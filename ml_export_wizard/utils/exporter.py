@@ -657,6 +657,7 @@ class ExporterQuery(object):
     # Management methods
     def is_update_safe(self) -> bool:
         """ Raises exception if the query is currently executing """
+        
         if self._is_executing:
             raise MLExportWizardQueryExecuting("Cannot update query while it is executing")
         
