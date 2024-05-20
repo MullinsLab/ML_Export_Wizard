@@ -1,4 +1,5 @@
-import csv, io, json, copy, re
+import csv, io, json, copy, re, inspect
+
 from weakref import proxy
 from openpyxl import Workbook
 from tempfile import NamedTemporaryFile
@@ -14,7 +15,7 @@ import logging
 log = logging.getLogger(settings.ML_EXPORT_WIZARD['Logger'])
 
 from ml_export_wizard.utils.simple import fancy_name, deep_exists, listify
-from ml_export_wizard.exceptions import MLExportWizardFieldNotFound, MLExportWizardQueryExecuting, MLExportWizardQueryNotExecuted, MLExportWizardExporterNotFound
+from ml_export_wizard.exceptions import MLExportWizardFieldNotFound, MLExportWizardQueryExecuting, MLExportWizardQueryNotExecuted, MLExportWizardParameterNotInExternalValues
 
 
 exporters: dict[str, "Exporter"] = {}
@@ -66,7 +67,9 @@ class Exporter(BaseExporter):
             self.fields_by_name[field_object.name] = field_object
 
     def query(self, *args, **kwargs) -> "ExporterQuery":
-        """ Returns a ExporterQuery object """
+        """ Returns an ExporterQuery object """
+
+        log.warn(f"Caller: {inspect.stack()[1][3]}, external_values: {kwargs.get('external_values', {})}")
 
         return ExporterQuery(exporter=self, *args, **kwargs)
     
@@ -128,6 +131,34 @@ class Exporter(BaseExporter):
         else:
             rollup_query_layer = "outer"
             field_query_layer = "base"
+
+        # Set up early compound_where_before_join elements
+        for compound_where_before_join in self.settings.get("compound_where_before_join", []):
+            filter_bits: list[str] = []
+
+            # If we get an exception, reraise it if the if_missing_value is "raise error", otherwise continue without the filter
+            try:
+                for table, filters in compound_where_before_join.get("filter", {}).items():
+                    for filter_item in filters:
+                        log.debug(query.__dict__)
+                        added_where_bit, added_where_parameters = _resolve_where(operator=filter_item.get("operator", "="), value=filter_item.get("value"), query=filter_item.get("query"), field=self.find_field(field=filter_item["field"]), query_layer=field_query_layer, external_values=query.external_values)
+                        filter_bits.append(added_where_bit)
+
+                        if "parameters" not in sql_dict:
+                            sql_dict["parameters"] = {}
+
+                        sql_dict["parameters"] = sql_dict["parameters"] | added_where_parameters
+
+                if filter_bits:
+                    sql_dict["where"] = f" {compound_where_before_join['operator']} ".join(filter_bits)
+
+            except MLExportWizardParameterNotInExternalValues as e:
+                if compound_where_before_join.get("if_missing_value") == "don't filter":    
+                    continue
+
+                else:
+                    raise e
+
 
         for app in self.apps:
             sql_dict = merge_sql_dicts(sql_dict, app._sql_dict(query=query, query_layer=query_layer))
@@ -278,7 +309,6 @@ class Exporter(BaseExporter):
             sql_dict = {}
 
         # Set up Select
-        
         if query.extra_field:
             for column in query.extra_field:
                 added_select_bit, added_parameters = self._resolve_extra_field(column=column, query_layer=query_layer, field_query_layer=field_query_layer)
@@ -332,9 +362,11 @@ class Exporter(BaseExporter):
 
                 sql_dict["order_by"] = ", ".join(filter(None, (sql_dict.get("order_by"), order_bit)))
 
+        # Set up Limit
         if query.limit:
             sql_dict["limit"] = query.limit
 
+        # Set up Where
         if query.where:
             for where_item in query.where:
                 added_parameters: dict = {}
@@ -562,13 +594,16 @@ class Exporter(BaseExporter):
 class ExporterQuery(object):
     """ Class used to describe queries to be run"""
 
-    def __init__(self, *, exporter: Exporter=None, count: str=None, group_by: dict|list|str=None, where_before_join: dict=None, where: dict=None, extra_field: dict|list=None, order_by: str|list=None, limit: int=None):
+    def __init__(self, *, exporter: Exporter=None, count: str=None, group_by: dict|list|str=None, where_before_join: dict=None, compound_where_before_join: dict=None, where: dict=None, extra_field: dict|list=None, order_by: str|list=None, limit: int=None, external_values: dict=None):
         """ Initialize the object """
 
         self._exporter = exporter
         self._where_before_join = where_before_join
+        self._compound_where_before_join = compound_where_before_join
         self._limit = limit
         self._count = count
+        self._external_values = external_values or {}
+        log.warn(f"Got external values: {self._external_values}")
 
         # Some attributes should be lists, but we accept other objects and convert them
         self._group_by = listify(group_by) 
@@ -588,6 +623,14 @@ class ExporterQuery(object):
     @property
     def where_before_join(self) -> dict:
         return self._where_before_join
+    
+    @property
+    def compound_where_before_join(self) -> dict:
+        return self._compound_where_before_join
+    
+    @property
+    def external_values(self) -> dict:
+        return self._external_values
     
     @property
     def limit(self) -> list:
@@ -623,6 +666,16 @@ class ExporterQuery(object):
     def where_before_join(self, value: dict) -> None:
         self.is_update_safe()
         self._where_before_join = value
+
+    @compound_where_before_join.setter
+    def compound_where_before_join(self, value: dict) -> None:
+        self.is_update_safe()
+        self._compound_where_before_join = value
+
+    @external_values.setter
+    def external_values(self, value: dict) -> None:
+        self.is_update_safe()
+        self._external_values = value
 
     @limit.setter
     def limit(self, value: int) -> None:
@@ -820,7 +873,7 @@ class ExporterModel(BaseExporter):
 
         return self.model.objects.model._meta.db_table
 
-    def _sql_dict(self, *, table_name: str=None, left_join: bool=False, join_model: object=None, join_using: str=None, query: ExporterQuery, query_layer: str=None) -> dict[str: str]:
+    def _sql_dict(self, *, table_name: str=None, left_join: bool=False, join_model: object=None, join_using: str=None, query: ExporterQuery, query_layer: str=None, external_values: dict=None) -> dict[str: str]:
         """ Create an SQL_Dict for the query bits from this model"""
 
         sql_dict: dict[str: str] = {}
@@ -838,6 +891,9 @@ class ExporterModel(BaseExporter):
             
             if where_bit:
                 table = f" (SELECT * FROM {table} WHERE {where_bit}) AS {table}"
+
+        # Enact compound limits that are supposed to happen before the tables are joined
+        #if query.where_before_join and self.name in query.where_before_join:
 
         join_criteria: str = ""
 
@@ -1065,20 +1121,33 @@ class ExporterPseudofield(BaseExporter):
         return sql_dict
 
 
-def _resolve_where(*, operator: str=None, field: ExporterField|ExporterPseudofield=None, value: str|int|float=None, query_layer: str=None) -> tuple[str, dict]:
+def _resolve_where(*, operator: str=None, field: ExporterField|ExporterPseudofield=None, value: str|int|float=None, query: str=None, query_layer: str=None, external_values: list=None) -> tuple[str, dict]:
     """ Resolve the where bit of a query. Returns a tuple with the where part and parameters """
 
-    if not operator or not field or not value:
+    if not operator or not field or not (value or query):
         return (None, None)
 
     where_bit: str = ""
     parameters: dict = {}
     field_column = field.column(query_layer=query_layer)
 
-    if operator in ("=", ">=", "<=", "<>", "!="):
-        where_bit = "AND ".join(filter(None, (where_bit, f"{field_column}{operator}%({field_column})s")))
+    if value:
+        if operator in ("=", ">=", "<=", "<>", "!=", "in", "not in"):
+            where_bit = "AND ".join(filter(None, (where_bit, f"{field_column} {operator} %({field_column})s")))
 
-    parameters[field_column] = value
+        parameters[field_column] = value
+
+    elif query:
+        log.warn(external_values)
+        for parameter in re.findall(r"\{(.*?)\}", query):
+            if external_values and parameter in external_values:
+                query = query.replace(f"{{{parameter}}}", f"%({parameter})s")
+                parameters[parameter] = external_values[parameter]
+            else:
+                raise MLExportWizardParameterNotInExternalValues(f"Parameter {parameter} not found in external_values")
+
+        if operator in ("=", ">=", "<=", "<>", "!=", "in", "not in"):
+            where_bit = "AND ".join(filter(None, (where_bit, f"{field_column} {operator} ({query})")))
 
     return (where_bit, parameters)
 

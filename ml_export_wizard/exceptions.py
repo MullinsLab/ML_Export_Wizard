@@ -30,3 +30,6 @@ class MLExportWizardQueryNotExecuted(LoggingException):
 
 class MLExportWizardExporterNotFound(LoggingException):
     """ The exporter was not found """
+
+class MLExportWizardParameterNotInExternalValues(LoggingException):
+    """ The parameter was not found in the external values """
