@@ -138,10 +138,9 @@ class Exporter(BaseExporter):
 
             # If we get an exception, reraise it if the if_missing_value is "raise error", otherwise continue without the filter
             try:
-                for table, filters in compound_where_before_join.get("filter", {}).items():
+                for model, filters in compound_where_before_join.get("filter", {}).items():
                     for filter_item in filters:
-                        log.debug(query.__dict__)
-                        added_where_bit, added_where_parameters = _resolve_where(operator=filter_item.get("operator", "="), value=filter_item.get("value"), query=filter_item.get("query"), field=self.find_field(field=filter_item["field"]), query_layer=field_query_layer, external_values=query.external_values)
+                        added_where_bit, added_where_parameters = _resolve_where(operator=filter_item.get("operator", "="), value=filter_item.get("value"), query=filter_item.get("query"), field=self.find_field(model=model, field=filter_item["field"]), query_layer=field_query_layer, external_values=query.external_values)
                         filter_bits.append(added_where_bit)
 
                         if "parameters" not in sql_dict:
@@ -603,7 +602,6 @@ class ExporterQuery(object):
         self._limit = limit
         self._count = count
         self._external_values = external_values or {}
-        log.warn(f"Got external values: {self._external_values}")
 
         # Some attributes should be lists, but we accept other objects and convert them
         self._group_by = listify(group_by) 
@@ -1039,7 +1037,7 @@ class ExporterField(BaseExporter):
         parent.fields.append(self)
         parent.fields_by_name[self.name] = self
 
-    def column(self, *, query_layer: str=None) -> str:
+    def column(self, *, query_layer: str=None, include_model=False) -> str:
         """ returns the name of the DB column for the field"""
 
         column: str = ""
@@ -1057,6 +1055,9 @@ class ExporterField(BaseExporter):
             column = f"{self.parent.table}_{column}"
         elif query_layer == "outer":
             column = f"{self.parent.table}_{column} as {column}"
+
+        if include_model:
+            column = f"{self.parent.table}.{column}"
 
         return column
 
@@ -1106,7 +1107,7 @@ class ExporterPseudofield(BaseExporter):
         parent.fields.append(self)
         parent.fields_by_name[self.name] = self
 
-    def column(self, *, query_layer: str=None) -> str:
+    def column(self, *, query_layer: str=None, include_model=False) -> str:
         """ returns the name of the DB column for the pseudofield """
 
         column: str = self.name
@@ -1129,7 +1130,7 @@ def _resolve_where(*, operator: str=None, field: ExporterField|ExporterPseudofie
 
     where_bit: str = ""
     parameters: dict = {}
-    field_column = field.column(query_layer=query_layer)
+    field_column = field.column(query_layer=query_layer, include_model=True)
 
     if value:
         if operator in ("=", ">=", "<=", "<>", "!=", "in", "not in"):
