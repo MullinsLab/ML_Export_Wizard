@@ -69,8 +69,6 @@ class Exporter(BaseExporter):
     def query(self, *args, **kwargs) -> "ExporterQuery":
         """ Returns an ExporterQuery object """
 
-        log.warn(f"Caller: {inspect.stack()[1][3]}, external_values: {kwargs.get('external_values', {})}")
-
         return ExporterQuery(exporter=self, *args, **kwargs)
     
     def csv(self, *, query: "ExporterQuery", file_name: str=None) -> str|None:
@@ -1139,7 +1137,6 @@ def _resolve_where(*, operator: str=None, field: ExporterField|ExporterPseudofie
         parameters[field_column] = value
 
     elif query:
-        log.warn(external_values)
         for parameter in re.findall(r"\{(.*?)\}", query):
             if external_values and parameter in external_values:
                 query = query.replace(f"{{{parameter}}}", f"%({parameter})s")
