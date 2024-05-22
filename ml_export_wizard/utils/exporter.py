@@ -138,7 +138,6 @@ class Exporter(BaseExporter):
             try:
                 for model, filters in compound_where_before_join.get("filter", {}).items():
                     for filter_item in filters:
-                        log.warn(f"Field_query_layer: {field_query_layer}")
                         added_where_bit, added_where_parameters = _resolve_where(operator=filter_item.get("operator", "="), value=filter_item.get("value"), query=filter_item.get("query"), field=self.find_field(model=model, field=filter_item["field"]), query_layer=field_query_layer, external_values=query.external_values)
                         filter_bits.append(added_where_bit)
 
@@ -1123,7 +1122,6 @@ def _resolve_where(*, operator: str=None, field: ExporterField|ExporterPseudofie
 
     where_bit: str = ""
     parameters: dict = {}
-    log.warn(f"Query_layer: {query_layer}")
 
     # Probably not exactly right, should be reviewed at some point
     if not query_layer:
