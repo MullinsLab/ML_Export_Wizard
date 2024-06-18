@@ -413,7 +413,7 @@ class Exporter(BaseExporter):
             sql = f"{sql} LIMIT {sql_dict['limit']}"
 
         if sql_only:
-            return sql % {key: f"'{value}'" for (key, value) in parameters.items()}
+            return sql % {key: f"'{value}'" if not isinstance(value, list) else f"ARRAY[{','.join(str(value))}]" for (key, value) in parameters.items()} 
 
         return (sql, parameters)
     
@@ -1131,7 +1131,10 @@ def _resolve_where(*, operator: str=None, field: ExporterField|ExporterPseudofie
 
     if value:
         if operator in ("=", ">=", "<=", "<>", "!=", "in", "not in"):
-            where_bit = "AND ".join(filter(None, (where_bit, f"{field_column} {operator} %({field_column})s")))
+            if operator in ("in", "not in"):
+                where_bit = "AND ".join(filter(None, (where_bit, f"{field_column} {operator} (select unnest(%({field_column})s))")))
+            else:
+                where_bit = "AND ".join(filter(None, (where_bit, f"{field_column} {operator} %({field_column})s")))
 
         parameters[field_column] = value
 
